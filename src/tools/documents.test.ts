@@ -22,6 +22,7 @@ import { PaperlessAPI } from "../api/PaperlessAPI";
 import { CustomField } from "../api/types";
 import {
   buildBulkEditParameters,
+  normalizePages,
   registerDocumentTools,
   validateFilePath,
 } from "./documents";
@@ -822,4 +823,188 @@ describe("nullable foreign keys can still be cleared (#138)", () => {
     assert.equal(data.owner, null);
   });
 
+});
+
+describe("household fork: page lists for split and delete_pages", () => {
+  test("delete_pages sends integers, from a list or a string with ranges", () => {
+    assert.deepEqual(normalizePages("delete_pages", [2, 3]), [2, 3]);
+    assert.deepEqual(normalizePages("delete_pages", "2-4,6"), [2, 3, 4, 6]);
+    assert.deepEqual(normalizePages("delete_pages", "[1, 3]"), [1, 3]);
+  });
+
+  test("split sends the bracket-free string Paperless 3.x accepts", () => {
+    assert.equal(normalizePages("split", "[1-2,3,4-5]"), "1-2,3,4-5");
+    assert.equal(normalizePages("split", "1-2, 3"), "1-2,3");
+    assert.equal(normalizePages("split", [1, 2, 3]), "1,2,3");
+  });
+
+  test("rejects page input Paperless would reject", () => {
+    assert.throws(() => normalizePages("delete_pages", "a,b"), /Invalid page/);
+    assert.throws(() => normalizePages("delete_pages", "4-2"), /Invalid page range/);
+    assert.throws(() => normalizePages("delete_pages", "0"), /Invalid page/);
+    assert.throws(() => normalizePages("split", "1-2;3"), /Invalid split pages/);
+  });
+
+  test("bulk_edit_documents passes the normalized pages to Paperless", async () => {
+    const { api, calls } = createDocumentApi([]);
+
+    await withDocumentClient(api, async (client) => {
+      for (const args of [
+        { documents: [7], method: "delete_pages", pages: "2-3" },
+        { documents: [7], method: "split", pages: [1, 2] },
+      ]) {
+        const result = (await client.callTool({
+          name: "bulk_edit_documents",
+          arguments: args,
+        })) as CallToolResult;
+        assert.ok(!result.isError, parseToolText(result)?.error);
+      }
+    });
+
+    assert.deepEqual(
+      calls.bulkEditDocuments.map(([, method, parameters]) => [method, parameters.pages]),
+      [
+        ["delete_pages", [2, 3]],
+        ["split", "1,2"],
+      ]
+    );
+  });
+});
+
+describe("household fork: deleting documents is off unless allowed", () => {
+  async function callWithEnv(value: string | undefined, args: Record<string, unknown>) {
+    const previous = process.env.PAPERLESS_MCP_ALLOW_DELETE;
+    if (value === undefined) delete process.env.PAPERLESS_MCP_ALLOW_DELETE;
+    else process.env.PAPERLESS_MCP_ALLOW_DELETE = value;
+    const { api, calls } = createDocumentApi([]);
+    let result: CallToolResult | undefined;
+    try {
+      await withDocumentClient(api, async (client) => {
+        result = (await client.callTool({ name: "bulk_edit_documents", arguments: args })) as CallToolResult;
+      });
+    } finally {
+      if (previous === undefined) delete process.env.PAPERLESS_MCP_ALLOW_DELETE;
+      else process.env.PAPERLESS_MCP_ALLOW_DELETE = previous;
+    }
+    return { result: result!, calls };
+  }
+
+  test("refuses delete even with confirm", async () => {
+    const { result, calls } = await callWithEnv(undefined, { documents: [1], method: "delete", confirm: true });
+    assert.ok(result.isError);
+    assert.match(parseToolText(result)?.error ?? "", /turned off/);
+    assert.equal(calls.bulkEditDocuments.length, 0);
+  });
+
+  test("refuses merge or split with delete_originals", async () => {
+    for (const method of ["merge", "split"]) {
+      const { result, calls } = await callWithEnv(undefined, {
+        documents: [1, 2],
+        method,
+        pages: method === "split" ? "1,2" : undefined,
+        delete_originals: true,
+      });
+      assert.ok(result.isError, `${method} with delete_originals should be refused`);
+      assert.equal(calls.bulkEditDocuments.length, 0);
+    }
+  });
+
+  test("allows split without delete_originals", async () => {
+    const { result, calls } = await callWithEnv(undefined, { documents: [1], method: "split", pages: "1,2" });
+    assert.ok(!result.isError, parseToolText(result)?.error);
+    assert.equal(calls.bulkEditDocuments.length, 1);
+  });
+
+  test("PAPERLESS_MCP_ALLOW_DELETE=true lets a confirmed delete through", async () => {
+    const { result, calls } = await callWithEnv("true", { documents: [1], method: "delete", confirm: true });
+    assert.ok(!result.isError, parseToolText(result)?.error);
+    assert.deepEqual(calls.bulkEditDocuments, [[[1], "delete", {}]]);
+  });
+});
+
+describe("household fork: update_document cannot overwrite the OCR text", () => {
+  test("the tool schema has no content parameter and warns that tags replace the set", async () => {
+    const { api } = createDocumentApi([]);
+
+    await withDocumentClient(api, async (client) => {
+      const { tools } = await client.listTools();
+      const update = tools.find((tool) => tool.name === "update_document");
+      assert.ok(update, "update_document should be registered");
+      const properties = (update.inputSchema.properties ?? {}) as Record<string, { description?: string }>;
+      assert.equal("content" in properties, false);
+      assert.match(properties.tags?.description ?? "", /REPLACES/);
+    });
+  });
+
+  test("a content argument never reaches Paperless", async () => {
+    const { api, calls } = createDocumentApi([]);
+
+    await withDocumentClient(api, async (client) => {
+      let rejected = false;
+      try {
+        const result = (await client.callTool({
+          name: "update_document",
+          arguments: { id: 5, title: "Receipt", content: "overwritten" },
+        })) as CallToolResult;
+        rejected = Boolean(result.isError);
+      } catch {
+        rejected = true;
+      }
+      const sent = calls.updateDocument[0]?.[1] ?? {};
+      assert.ok(rejected || !("content" in sent), "content must not be forwarded");
+    });
+  });
+});
+
+describe("household fork: get_task", () => {
+  test("returns the consumption task's status and new document id", async () => {
+    const requested: string[] = [];
+    const api = {
+      getTask: async (taskId: string) => {
+        requested.push(taskId);
+        return {
+          id: 9,
+          task_id: taskId,
+          task_file_name: "receipt.pdf",
+          status: "SUCCESS",
+          result: "Success. New document id 42 created",
+          related_document: "42",
+          date_created: "2026-10-16T16:00:00Z",
+          date_done: "2026-10-16T16:00:08Z",
+          acknowledged: false,
+        };
+      },
+    } as unknown as PaperlessAPI;
+
+    await withDocumentClient(api, async (client) => {
+      const result = (await client.callTool({
+        name: "get_task",
+        arguments: { task_id: "8a4c-uuid" },
+      })) as CallToolResult;
+      assert.ok(!result.isError, parseToolText(result)?.error);
+      assert.deepEqual(parseToolText(result), {
+        task_id: "8a4c-uuid",
+        task_file_name: "receipt.pdf",
+        status: "SUCCESS",
+        result: "Success. New document id 42 created",
+        related_document: "42",
+        date_created: "2026-10-16T16:00:00Z",
+        date_done: "2026-10-16T16:00:08Z",
+      });
+    });
+    assert.deepEqual(requested, ["8a4c-uuid"]);
+  });
+
+  test("reports an unknown task id as an error", async () => {
+    const api = { getTask: async () => null } as unknown as PaperlessAPI;
+
+    await withDocumentClient(api, async (client) => {
+      const result = (await client.callTool({
+        name: "get_task",
+        arguments: { task_id: "missing" },
+      })) as CallToolResult;
+      assert.ok(result.isError);
+      assert.match(parseToolText(result)?.error ?? "", /No task found/);
+    });
+  });
 });

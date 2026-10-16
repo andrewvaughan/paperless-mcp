@@ -6,6 +6,27 @@
 
 An MCP (Model Context Protocol) server for interacting with a Paperless-NGX API server. This server provides tools for managing documents, tags, correspondents, and document types in your Paperless-NGX instance.
 
+## What this fork changes
+
+This is Andrew Vaughan's fork of [baruchiro/paperless-mcp](https://github.com/baruchiro/paperless-mcp), used by two household AI agents against a self-hosted Paperless-ngx 3.3.2. It is built from source and nothing here is published to npm. The `household` branch is upstream release v2.2.1 (commit `5bbd648`, the npm 2.2.1 `gitHead`) plus one commit, and every change is marked "household fork" in the source.
+
+| Change | Why | Files |
+|---|---|---|
+| `bulk_edit_documents` accepts `pages` as a string or a list of integers and sends what each method needs: integers for `delete_pages`, a bracket-free string such as `1-2,3,4-5` for `split` | Paperless 3.x validates the two methods differently. Upstream sent one string for both, so `delete_pages` failed on every call, and the upstream README's `split` example uses brackets that Paperless rejects | `src/tools/documents.ts` (`normalizePages`), `src/api/types.ts` |
+| New `get_task` tool (`GET /api/tasks/?task_id=`) | `post_document` returns only a task id. `get_task` shows whether consumption succeeded, why it failed, and the new document's id (upstream issue #157) | `src/tools/documents.ts`, `src/api/PaperlessAPI.ts` (`getTask`), `src/api/types.ts` (`PaperlessTask`) |
+| Deleting documents is refused unless `PAPERLESS_MCP_ALLOW_DELETE=true`: method `delete`, and `delete_originals` on `merge` or `split` | Upstream gates `delete` only behind `confirm` and lets `delete_originals` through. The agents' Paperless users have no delete permission either, so this is a second layer | `src/tools/documents.ts` (`documentDeletionAllowed`) |
+| `update_document` no longer takes `content`, and its `tags` description says the list replaces the document's whole tag set | `content` overwrote the OCR text that search runs on (`reprocess` regenerates it). The upstream `tags` text did not say that tags left out are removed | `src/tools/documents.ts` |
+
+Tests for each change are in `src/tools/documents.test.ts`, in the suites named "household fork".
+
+### Rebasing onto a new upstream release
+
+1. Fetch upstream and read its changelog, then its diff from `5bbd648` for `src/tools/documents.ts`, `src/api/PaperlessAPI.ts` and `src/api/types.ts`.
+2. Drop any change upstream now covers: check whether `delete_pages` sends integers, whether a task tool exists (issue #157), whether deletes are gated, and whether `update_document` still takes `content`.
+3. Rebase the `household` branch onto the release tag, resolve conflicts, then run `npm ci`, `npm test` and `npm run build`.
+4. Check Paperless's bulk-edit API before relying on the result. Paperless 3.3.2 marks `delete`, `reprocess`, `rotate`, `merge`, `split` and `delete_pages` on `/api/documents/bulk_edit/` for removal when API v9 is dropped, so a Paperless upgrade can break this server before any rebase does.
+5. Review the new commit, then point the deployment at it.
+
 ## Quick Start
 
 [![Install MCP Server](https://cursor.com/deeplink/mcp-install-light.svg)](https://cursor.com/install-mcp?name=paperless&config=eyJjb21tYW5kIjoibnB4IC15IEBiYXJ1Y2hpcm8vcGFwZXJsZXNzLW1jcEBsYXRlc3QiLCJlbnYiOnsiUEFQRVJMRVNTX1VSTCI6Imh0dHA6Ly95b3VyLXBhcGVybGVzcy1pbnN0YW5jZTo4MDAwIiwiUEFQRVJMRVNTX0FQSV9LRVkiOiJ5b3VyLWFwaS10b2tlbiJ9fQ%3D%3D)

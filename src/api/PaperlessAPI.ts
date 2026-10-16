@@ -17,6 +17,7 @@ import {
   MailRule,
   GetTagsResponse,
   Note,
+  PaperlessTask,
   Tag,
 } from "./types";
 import { headersToObject } from "./utils";
@@ -104,6 +105,16 @@ export class PaperlessAPI {
         parameters,
       }),
     });
+  }
+
+  // The spec returns a plain array for /api/tasks/; a paginated body is accepted too in case a later API
+  // version wraps it.
+  async getTask(taskId: string): Promise<PaperlessTask | null> {
+    const body = await this.request<PaperlessTask[] | { results?: PaperlessTask[] }>(
+      `/tasks/?task_id=${encodeURIComponent(taskId)}`
+    );
+    const list = Array.isArray(body) ? body : body?.results ?? [];
+    return list[0] ?? null;
   }
 
   async postDocument(

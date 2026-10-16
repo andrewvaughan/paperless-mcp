@@ -40,6 +40,55 @@ const ALLOWED_UPLOAD_PATHS = process.env.PAPERLESS_MCP_UPLOAD_PATHS
   ? process.env.PAPERLESS_MCP_UPLOAD_PATHS.split(":")
   : [];
 
+/**
+ * Household fork: deleting documents (method "delete") and trashing the originals after a merge or split
+ * stay off unless PAPERLESS_MCP_ALLOW_DELETE is "true", so an agent cannot remove paperwork even when a
+ * tool call asks it to. Read per call so the setting can be tested without reloading the module.
+ */
+export function documentDeletionAllowed(): boolean {
+  return process.env.PAPERLESS_MCP_ALLOW_DELETE === "true";
+}
+
+/**
+ * Household fork: Paperless 3.x validates `pages` differently per method (serialisers.py, bulk edit):
+ * `delete_pages` needs a list of integers and `split` needs a bracket-free string such as "1-2,3,4-5",
+ * where each comma-separated group becomes one new document. Callers may send either form; this returns
+ * the one the method needs, or throws on input Paperless would reject.
+ */
+export function normalizePages(
+  method: string,
+  pages: string | number[] | undefined
+): string | number[] | undefined {
+  if (pages === undefined) return undefined;
+  if (method === "delete_pages") {
+    if (Array.isArray(pages)) return pages;
+    const out: number[] = [];
+    for (const part of pages.replace(/[[\]\s]/g, "").split(",").filter(Boolean)) {
+      const range = part.match(/^(\d+)-(\d+)$/);
+      if (range) {
+        const start = Number(range[1]);
+        const end = Number(range[2]);
+        if (start < 1 || end < start) throw new Error(`Invalid page range "${part}" for delete_pages.`);
+        for (let page = start; page <= end; page++) out.push(page);
+      } else if (/^\d+$/.test(part) && Number(part) >= 1) {
+        out.push(Number(part));
+      } else {
+        throw new Error(`Invalid page "${part}" for delete_pages; use page numbers such as [2, 3] or "2-3".`);
+      }
+    }
+    if (out.length === 0) throw new Error("delete_pages needs at least one page number.");
+    return out;
+  }
+  if (method === "split") {
+    const text = Array.isArray(pages) ? pages.join(",") : pages.replace(/[[\]\s]/g, "");
+    if (!/^\d+(-\d+)?(,\d+(-\d+)?)*$/.test(text)) {
+      throw new Error(`Invalid split pages "${String(pages)}"; use groups such as "1-2,3,4-5" or a list of page numbers.`);
+    }
+    return text;
+  }
+  return pages;
+}
+
 /** Validates that a file path is safe to read for document upload. */
 export async function validateFilePath(filePath: string): Promise<void> {
   if (!isAbsolute(filePath)) {
@@ -149,7 +198,7 @@ async function executeDocumentQuery(
 export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
   server.tool(
     "bulk_edit_documents",
-    "Perform bulk operations on multiple documents. Note: 'remove_tag' removes a tag from specific documents (tag remains in system), while 'delete_tag' permanently deletes a tag from the entire system. ⚠️ WARNING: 'delete' method permanently deletes documents and requires confirmation.",
+    "Perform bulk operations on multiple documents. Note: 'remove_tag' removes a tag from specific documents (tag remains in system), while 'delete_tag' permanently deletes a tag from the entire system. ⚠️ WARNING: 'delete' method permanently deletes documents and requires confirmation. On this server deleting documents, including delete_originals on merge or split, is turned off unless the operator allows it.",
     {
       documents: z.array(z.number()),
       method: z.enum([
@@ -232,8 +281,18 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
           "For set_permissions: true adds to existing permissions and keeps the current owner; false (default) replaces the listed users/groups"
         ),
       metadata_document_id: z.number().optional(),
-      delete_originals: z.boolean().optional(),
-      pages: z.string().optional(),
+      delete_originals: z
+        .boolean()
+        .optional()
+        .describe(
+          "For merge and split: trash the source documents afterwards. Refused unless the server allows deleting documents."
+        ),
+      pages: z
+        .union([z.string(), z.array(z.number().int().positive())])
+        .optional()
+        .describe(
+          "For split: page groups, each becoming a new document, as \"1-2,3,4-5\" or a list of page numbers (one document per page). For delete_pages: the pages to remove, as a list such as [2, 3] or a string such as \"2-3\"."
+        ),
       degrees: z.number().optional(),
       confirm: z
         .boolean()
@@ -250,6 +309,14 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
         );
       }
       if (
+        (args.method === "delete" || args.delete_originals === true) &&
+        !documentDeletionAllowed()
+      ) {
+        throw new Error(
+          "Deleting documents is turned off on this server (PAPERLESS_MCP_ALLOW_DELETE). Merge or split without delete_originals, and ask a person to delete anything that should go."
+        );
+      }
+      if (
         args.method === "set_permissions" &&
         !args.set_permissions &&
         args.owner === undefined
@@ -259,6 +326,9 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
         );
       }
       const { documents, method, add_custom_fields, confirm, ...parameters } = args;
+      if (parameters.pages !== undefined) {
+        parameters.pages = normalizePages(method, parameters.pages);
+      }
       if (method === "set_permissions") {
         // Paperless rejects (Paperless <= 3.0.5: crashes with a 500 on) a missing
         // set_permissions key even for owner-only changes.
@@ -358,7 +428,7 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
 
   server.tool(
     "post_document",
-    "Upload a new document to Paperless-NGX with optional metadata like title, correspondent, document type, tags, and custom fields. Provide either 'file' (base64-encoded content) or 'file_path' (absolute path to a file on the server's filesystem). Using file_path avoids base64 encoding overhead for large files. SECURITY: When using file_path, set PAPERLESS_MCP_UPLOAD_PATHS environment variable to restrict uploads to specific directories (colon-separated paths).",
+    "Upload a new document to Paperless-NGX with optional metadata like title, correspondent, document type, tags, and custom fields. Provide either 'file' (base64-encoded content) or 'file_path' (absolute path to a file on the server's filesystem). Using file_path avoids base64 encoding overhead for large files. SECURITY: When using file_path, set PAPERLESS_MCP_UPLOAD_PATHS environment variable to restrict uploads to specific directories (colon-separated paths). Paperless consumes the file in the background: the response carries the consumption task id, and get_task with that id shows whether it succeeded and the new document's id.",
     postDocumentBaseSchema.shape,
     withErrorHandling(async (args, extra) => {
       if (!api) throw new Error("Please configure API connection first");
@@ -423,6 +493,36 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
           {
             type: "text",
             text: JSON.stringify(result),
+          },
+        ],
+      };
+    })
+  );
+
+  server.tool(
+    "get_task",
+    "Check a background task, such as the consumption task id that post_document returns. Shows the status (PENDING, STARTED, SUCCESS or FAILURE), the result message (for a failure, the reason, such as a duplicate document), and related_document, the new document's id once it exists.",
+    {
+      task_id: z.string().min(1).describe("The task id, as returned by post_document"),
+    },
+    withErrorHandling(async (args, extra) => {
+      if (!api) throw new Error("Please configure API connection first");
+      const task = await api.getTask(args.task_id);
+      if (!task) throw new Error(`No task found with id ${args.task_id}`);
+      const { task_id, task_file_name, status, result, related_document, date_created, date_done } = task;
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              task_id,
+              task_file_name,
+              status,
+              result,
+              related_document,
+              date_created,
+              date_done,
+            }),
           },
         ],
       };
@@ -560,7 +660,7 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
 
   server.tool(
     "update_document",
-    "Update a specific document with new values (title, correspondent, document type, storage path, tags, custom fields, and more). Top-level fields you omit are left unchanged. IMPORTANT: custom_fields is the exception — see its parameter description; it replaces the document's entire custom-field set.",
+    "Update a specific document with new values (title, correspondent, document type, storage path, tags, custom fields, and more). Top-level fields you omit are left unchanged. IMPORTANT: tags and custom_fields are the exceptions; see their parameter descriptions. Each replaces the document's entire set. The OCR text cannot be changed here; bulk_edit_documents 'reprocess' regenerates it.",
     {
       id: z.number().describe("The ID of the document to update"),
       title: z
@@ -589,11 +689,9 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
       tags: z
         .array(z.number())
         .optional()
-        .describe("Array of tag IDs to assign to the document"),
-      content: z
-        .string()
-        .optional()
-        .describe("The raw text content of the document (used for searching)"),
+        .describe(
+          "Array of tag IDs. ⚠️ REPLACES the document's entire tag list: any tag not included here is REMOVED. To add or remove a tag without touching the others, use bulk_edit_documents with 'add_tag', 'remove_tag' or 'modify_tags' instead."
+        ),
       created: z
         .string()
         .optional()

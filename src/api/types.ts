@@ -201,13 +201,28 @@ export interface BulkEditDocumentsResult {
   result: string;
 }
 
+// TasksView in Paperless_ngx_REST_API.yaml (household fork, for get_task).
+export interface PaperlessTask {
+  id: number;
+  task_id: string;
+  task_name?: string | null;
+  task_file_name?: string | null;
+  date_created?: string | null;
+  date_done?: string | null;
+  type?: string;
+  status: string;
+  result?: string | null;
+  acknowledged?: boolean;
+  related_document?: string | number | null;
+}
+
 export interface BulkEditParameters {
   add_custom_fields?: Record<string, CustomFieldInstanceRequest["value"]>;
   remove_custom_fields?: number[];
   add_tags?: number[];
   remove_tags?: number[];
   degrees?: number;
-  pages?: string;
+  pages?: string | number[];
   metadata_document_id?: number;
   delete_originals?: boolean;
   correspondent?: number;
