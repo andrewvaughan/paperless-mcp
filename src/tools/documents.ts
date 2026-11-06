@@ -195,6 +195,99 @@ async function executeDocumentQuery(
   return convertDocsWithNames(docsResponse, api);
 }
 
+interface UploadInput {
+  file?: string;
+  file_path?: string;
+  filename?: string;
+}
+
+function refineUploadInput(data: UploadInput, ctx: z.RefinementCtx) {
+  const hasFile = data.file !== undefined;
+  const hasFilePath = data.file_path !== undefined;
+
+  if (!hasFile && !hasFilePath) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Either 'file' (base64) or 'file_path' must be provided.",
+      path: ["file"],
+    });
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Either 'file' (base64) or 'file_path' must be provided.",
+      path: ["file_path"],
+    });
+  }
+
+  if (hasFile && hasFilePath) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Only one of 'file' or 'file_path' should be provided, not both.",
+      path: ["file"],
+    });
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Only one of 'file' or 'file_path' should be provided, not both.",
+      path: ["file_path"],
+    });
+  }
+
+  if (hasFile && !data.filename) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "'filename' is required when using 'file' (base64 mode).",
+      path: ["filename"],
+    });
+  }
+
+  if (hasFilePath && data.file_path && !isAbsolute(data.file_path)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "file_path must be an absolute path",
+      path: ["file_path"],
+    });
+  }
+}
+
+export async function readUploadInput(args: UploadInput): Promise<{ document: Buffer; filename: string }> {
+  if (args.file_path) {
+    await validateFilePath(args.file_path);
+
+    let document: Buffer;
+    try {
+      document = await readFile(args.file_path);
+    } catch (err) {
+      throw new Error("Failed to read file");
+    }
+
+    const filename = args.filename || basename(args.file_path);
+    if (!filename) {
+      throw new Error("Could not derive filename from file_path");
+    }
+    return { document, filename };
+  }
+  if (args.file) {
+    const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+    if (!base64Regex.test(args.file)) {
+      throw new Error(
+        "Invalid base64-encoded file data. Please provide a valid base64 string."
+      );
+    }
+
+    const document = Buffer.from(args.file, "base64");
+
+    if (document.length > MAX_FILE_SIZE_BYTES) {
+      throw new Error(
+        `File size (${Math.round(document.length / 1024 / 1024)}MB) exceeds maximum allowed size (${MAX_FILE_SIZE_BYTES / 1024 / 1024}MB)`
+      );
+    }
+    if (document.length === 0) {
+      throw new Error("File is empty");
+    }
+    return { document, filename: args.filename! };
+  }
+  throw new Error("Either 'file' (base64) or 'file_path' must be provided.");
+}
+
 export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
   server.tool(
     "bulk_edit_documents",
@@ -379,52 +472,44 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
     custom_fields: z.array(z.number()).optional(),
   });
 
-  const postDocumentSchema = postDocumentBaseSchema.superRefine((data, ctx) => {
-    const hasFile = data.file !== undefined;
-    const hasFilePath = data.file_path !== undefined;
+  const postDocumentSchema = postDocumentBaseSchema.superRefine(refineUploadInput);
 
-    if (!hasFile && !hasFilePath) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Either 'file' (base64) or 'file_path' must be provided.",
-        path: ["file"],
-      });
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Either 'file' (base64) or 'file_path' must be provided.",
-        path: ["file_path"],
-      });
-    }
-
-    if (hasFile && hasFilePath) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Only one of 'file' or 'file_path' should be provided, not both.",
-        path: ["file"],
-      });
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Only one of 'file' or 'file_path' should be provided, not both.",
-        path: ["file_path"],
-      });
-    }
-
-    if (hasFile && !data.filename) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "'filename' is required when using 'file' (base64 mode).",
-        path: ["filename"],
-      });
-    }
-
-    if (hasFilePath && data.file_path && !isAbsolute(data.file_path)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "file_path must be an absolute path",
-        path: ["file_path"],
-      });
-    }
+  // Household fork (2026-11-06): Paperless 3.x keeps a document's versions under one id (POST
+  // /api/documents/<id>/update_version/), so a revised file can replace a filed one without a second document.
+  // Clyde uploaded a revised appeal as a new document because no tool did this.
+  const addVersionBaseSchema = z.object({
+    document_id: z.number().int().positive().describe("The id of the document the new version belongs to (any of its versions resolves to the root document)."),
+    file: z.string().optional().describe("Base64-encoded file content. Either 'file' or 'file_path' must be provided."),
+    file_path: z.string().optional().describe("Absolute path to a file on the server's filesystem, inside PAPERLESS_MCP_UPLOAD_PATHS. Either 'file' or 'file_path' must be provided."),
+    filename: z.string().optional().describe("Filename for the new version. Required when using 'file', optional when using 'file_path' (defaults to the basename of the path)."),
+    version_label: z.string().max(64).optional().describe("A short label for the version (Paperless allows 64 characters), such as 'revised' or 'signed'."),
   });
+  const addVersionSchema = addVersionBaseSchema.superRefine(refineUploadInput);
+
+  server.tool(
+    "add_document_version",
+    "Add a new version of an existing document: Paperless 3.x keeps the earlier file and makes the new file the document's current version, under the same id, title, tags and fields. Use it when a revised or corrected file replaces one already filed, instead of uploading a second document. Provide either 'file' (base64) or 'file_path' (absolute, inside PAPERLESS_MCP_UPLOAD_PATHS). Paperless consumes the file in the background: the response carries the consumption task id, and get_task shows whether it succeeded. Needs change permission on the document.",
+    addVersionBaseSchema.shape,
+    withErrorHandling(async (args, extra) => {
+      if (!api) throw new Error("Please configure API connection first");
+
+      const validationResult = addVersionSchema.safeParse(args);
+      if (!validationResult.success) {
+        throw new Error(validationResult.error.issues.map(e => e.message).join("; "));
+      }
+
+      const { document, filename } = await readUploadInput(args);
+      const response = await api.addDocumentVersion(args.document_id, document, filename, args.version_label);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ document_id: args.document_id, task_id: response }),
+          },
+        ],
+      };
+    })
+  );
 
   server.tool(
     "post_document",
@@ -438,47 +523,7 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
         throw new Error(validationResult.error.issues.map(e => e.message).join("; "));
       }
 
-      let document: Buffer;
-      let filename: string;
-
-      if (args.file_path) {
-        await validateFilePath(args.file_path);
-
-        try {
-          document = await readFile(args.file_path);
-        } catch (err) {
-          throw new Error("Failed to read file");
-        }
-
-        filename = args.filename || basename(args.file_path);
-        if (!filename) {
-          throw new Error("Could not derive filename from file_path");
-        }
-      } else if (args.file) {
-        const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
-        if (!base64Regex.test(args.file)) {
-          throw new Error(
-            "Invalid base64-encoded file data. Please provide a valid base64 string."
-          );
-        }
-
-        document = Buffer.from(args.file, "base64");
-
-        if (document.length > MAX_FILE_SIZE_BYTES) {
-          throw new Error(
-            `File size (${Math.round(document.length / 1024 / 1024)}MB) exceeds maximum allowed size (${MAX_FILE_SIZE_BYTES / 1024 / 1024}MB)`
-          );
-        }
-        if (document.length === 0) {
-          throw new Error("File is empty");
-        }
-
-        filename = args.filename!;
-      } else {
-        // This should never happen due to schema validation, but TypeScript needs it
-        throw new Error("Either 'file' (base64) or 'file_path' must be provided.");
-      }
-
+      const { document, filename } = await readUploadInput(args);
       const { file, file_path, filename: _fn, ...metadata } = args;
 
       const response = await api.postDocument(document, filename, metadata);

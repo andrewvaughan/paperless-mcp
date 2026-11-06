@@ -117,6 +117,40 @@ export class PaperlessAPI {
     return list[0] ?? null;
   }
 
+  /** Paperless 3.x: adds a file as the newest version of a document (its root document when given a version's id).
+   * Multipart `document` and optional `version_label`; answers with the consumption task id. */
+  async addDocumentVersion(
+    documentId: number,
+    document: Buffer,
+    filename: string,
+    versionLabel?: string
+  ): Promise<string> {
+    const formData = new FormData();
+    formData.append("document", document, { filename });
+    if (versionLabel) formData.append("version_label", versionLabel);
+
+    try {
+      const response = await axios.post<string>(
+        `${this.baseUrl}/api/documents/${documentId}/update_version/`,
+        formData,
+        {
+          headers: {
+            Authorization: `Token ${this.token}`,
+            Accept: `application/json; version=${this.apiVersion}`,
+            ...formData.getHeaders(),
+          },
+        }
+      );
+      return response.data;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response) {
+        const detail = typeof error.response.data === "string" ? error.response.data : JSON.stringify(error.response.data);
+        throw new Error(`HTTP ${error.response.status} adding a version to document ${documentId}: ${detail.slice(0, 300)}`);
+      }
+      throw error;
+    }
+  }
+
   async postDocument(
     document: Buffer,
     filename: string,

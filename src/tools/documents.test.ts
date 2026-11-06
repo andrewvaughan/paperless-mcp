@@ -1008,3 +1008,75 @@ describe("household fork: get_task", () => {
     });
   });
 });
+
+describe("add_document_version tool (household fork)", () => {
+  function versionApi() {
+    const calls: Array<[number, string, string, string | undefined]> = [];
+    const api = {
+      addDocumentVersion: async (id: number, document: Buffer, filename: string, label?: string) => {
+        calls.push([id, document.toString("utf8"), filename, label]);
+        return "task-abc";
+      },
+      getCorrespondents: async () => ({ results: [] }),
+      getDocumentTypes: async () => ({ results: [] }),
+      getTags: async () => ({ results: [] }),
+      getCustomFields: async () => ({ results: [] }),
+    } as unknown as PaperlessAPI;
+    return { api, calls };
+  }
+
+  test("a base64 file goes to the document as a new version and the task id comes back", async () => {
+    const { api, calls } = versionApi();
+    await withDocumentClient(api, async (client) => {
+      const result = (await client.callTool({
+        name: "add_document_version",
+        arguments: {
+          document_id: 4026,
+          file: Buffer.from("revised packet").toString("base64"),
+          filename: "appeal-v2.pdf",
+          version_label: "revised",
+        },
+      })) as CallToolResult;
+      assert.ok(!result.isError, parseToolText(result)?.error);
+      assert.deepEqual(parseToolText(result), { document_id: 4026, task_id: "task-abc" });
+    });
+    assert.deepEqual(calls, [[4026, "revised packet", "appeal-v2.pdf", "revised"]]);
+  });
+
+  test("a file_path is read and its basename becomes the filename", async () => {
+    const { api, calls } = versionApi();
+    const dir = mkdtempSync(join(tmpdir(), "pl-version-"));
+    const path = join(dir, "letter v2.pdf");
+    writeFileSync(path, "from disk");
+    try {
+      await withDocumentClient(api, async (client) => {
+        const result = (await client.callTool({
+          name: "add_document_version",
+          arguments: { document_id: 12, file_path: path },
+        })) as CallToolResult;
+        assert.ok(!result.isError, parseToolText(result)?.error);
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    assert.deepEqual(calls, [[12, "from disk", "letter v2.pdf", undefined]]);
+  });
+
+  test("no file, a relative path, or a missing filename for base64 is refused before any call", async () => {
+    const { api, calls } = versionApi();
+    await withDocumentClient(api, async (client) => {
+      for (const [args, pattern] of [
+        [{ document_id: 1 }, /Either 'file' \(base64\) or 'file_path' must be provided/],
+        [{ document_id: 1, file_path: "relative/a.pdf" }, /absolute path/],
+        [{ document_id: 1, file: Buffer.from("x").toString("base64") }, /'filename' is required/],
+      ] as Array<[Record<string, unknown>, RegExp]>) {
+        const result = (await client.callTool({ name: "add_document_version", arguments: args })) as CallToolResult;
+        assert.ok(result.isError, JSON.stringify(args));
+        const text = result.content?.[0];
+        const message = text && text.type === "text" ? text.text : "";
+        assert.match(message, pattern);
+      }
+    });
+    assert.equal(calls.length, 0);
+  });
+});
