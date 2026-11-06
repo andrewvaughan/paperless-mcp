@@ -184,7 +184,7 @@ When creating or modifying tools, clearly distinguish:
 - `express` (^5.1.0) - HTTP server for HTTP transport mode
 - `form-data` (^4.0.2) - Multipart form data for file uploads
 - `typescript` (^5.8.3) - TypeScript compiler (Note: Listed as production dependency in this project)
-- `zod` (~4.4.3) - Schema validation. **The pin is deliberate, do not widen it.** On the v4 path the SDK converts schemas with zod's own `toJSONSchema`, which emits `anyOf` for a nullable or union field; from 4.5.0 on it went back to collapsing unchecked ones into `"type": ["string", "null"]`, which strict MCP clients reject by dropping the whole tool (#138). `src/tools/schemaCompat.test.ts` fails if that form reappears.
+- `zod` (~4.6.7 in the household fork, for GHSA-mrhx-c7xc-m3w5; upstream pins ~4.4.3) - Schema validation. On the v4 path the SDK converts schemas with zod's own `toJSONSchema`; from 4.5.0 on it collapses a union of unchecked primitives (or a nullable unchecked primitive) into `"type": ["string", "null"]`, which strict MCP clients reject by dropping the whole tool (#138). Give each member a description or a check (`.int()`, `.min()`), or write a nullable string as `z.union([z.string().describe(...), z.null()])`. `src/tools/schemaCompat.test.ts` fails if that form reappears.
 
 ### Development Dependencies
 - `@anthropic-ai/dxt` (^0.2.6) - Distribution packaging

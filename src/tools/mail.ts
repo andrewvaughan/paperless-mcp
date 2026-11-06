@@ -26,8 +26,14 @@ const mailRuleFields = {
   filter_to: z.string().max(256).nullable().optional(),
   filter_subject: z.string().max(256).nullable().optional(),
   filter_body: z.string().max(256).nullable().optional(),
-  filter_attachment_filename_include: z.string().nullable().optional(),
-  filter_attachment_filename_exclude: z.string().nullable().optional(),
+  // A described string and null as separate union members, so zod >= 4.5 does not emit `type: ["string", "null"]`
+  // (#138; household fork, zod 4.6.7).
+  filter_attachment_filename_include: z
+    .union([z.string().describe("A file name pattern"), z.null()])
+    .optional(),
+  filter_attachment_filename_exclude: z
+    .union([z.string().describe("A file name pattern"), z.null()])
+    .optional(),
   maximum_age: z.number().int().min(0).optional(),
   action: z
     .number()
@@ -36,7 +42,9 @@ const mailRuleFields = {
     .max(5)
     .optional()
     .describe(MAIL_RULE_ACTION_DESCRIPTION),
-  action_parameter: z.string().nullable().optional(),
+  action_parameter: z
+    .union([z.string().describe("The action's parameter, such as a folder or tag name"), z.null()])
+    .optional(),
   assign_title_from: z
     .number()
     .int()

@@ -8,7 +8,7 @@ An MCP (Model Context Protocol) server for interacting with a Paperless-NGX API 
 
 ## What this fork changes
 
-This is Andrew Vaughan's fork of [baruchiro/paperless-mcp](https://github.com/baruchiro/paperless-mcp), used by two household AI agents against a self-hosted Paperless-ngx 3.3.2. It is built from source and nothing here is published to npm. The `household` branch is upstream release v2.2.1 (commit `5bbd648`, the npm 2.2.1 `gitHead`) plus two commits, and every change is marked "household fork" in the source.
+This is Andrew Vaughan's fork of [baruchiro/paperless-mcp](https://github.com/baruchiro/paperless-mcp), used by two household AI agents against a self-hosted Paperless-ngx 3.4.2. It is built from source and nothing here is published to npm. The `household` branch is upstream release v2.2.1 (commit `5bbd648`, the npm 2.2.1 `gitHead`) plus three commits, and every change is marked "household fork" in the source.
 
 | Change | Why | Files |
 |---|---|---|
@@ -17,13 +17,14 @@ This is Andrew Vaughan's fork of [baruchiro/paperless-mcp](https://github.com/ba
 | Deleting documents is refused unless `PAPERLESS_MCP_ALLOW_DELETE=true`: method `delete`, and `delete_originals` on `merge` or `split` | Upstream gates `delete` only behind `confirm` and lets `delete_originals` through. The agents' Paperless users have no delete permission either, so this is a second layer | `src/tools/documents.ts` (`documentDeletionAllowed`) |
 | `update_document` no longer takes `content`, and its `tags` description says the list replaces the document's whole tag set | `content` overwrote the OCR text that search runs on (`reprocess` regenerates it). The upstream `tags` text did not say that tags left out are removed | `src/tools/documents.ts` |
 | `create_tag`, `create_correspondent` and `create_document_type` send `"owner": null` (2026-11-05, second commit) | Paperless makes the requesting user the owner when the body has no `owner` key, and an owned tag, correspondent or type is hidden from every other non-superuser. One agent's new tags were invisible to the other; the household rule is that nothing is owned | `src/api/PaperlessAPI.ts` (`createTag`, `createCorrespondent`, `createDocumentType`) |
+| zod moves from `~4.4.3` to `~4.6.7`, and the four schemas zod 4.6 would collapse into an array-valued `type` are written so it cannot: the `paperless_filters` scalar union's members carry descriptions, and the mail rules' three nullable strings are a described string unioned with `null` (2026-11-05, third commit) | zod 4.4.3 carries advisory GHSA-mrhx-c7xc-m3w5, fixed only in 4.6.7, and the build's production audit gate refuses it. zod 4.5 and later merge a union of unchecked primitives into `"type": [...]`, which strict MCP clients reject along with the whole tool (#138); a description or a check on each member keeps the `anyOf`. `schemaCompat.test.ts` passes on 4.6.7 | `package.json`, `package-lock.json`, `src/tools/utils/documentQuery.ts`, `src/tools/mail.ts` |
 
 Tests for each change are in `src/tools/documents.test.ts` and `src/api/createOwner.test.ts`, in the suites named "household fork".
 
 ### Rebasing onto a new upstream release
 
 1. Fetch upstream and read its changelog, then its diff from `5bbd648` for `src/tools/documents.ts`, `src/api/PaperlessAPI.ts` and `src/api/types.ts`.
-2. Drop any change upstream now covers: check whether `delete_pages` sends integers, whether a task tool exists (issue #157), whether deletes are gated, whether `update_document` still takes `content`, and whether the create calls for tags, correspondents and types still omit `owner`.
+2. Drop any change upstream now covers: check whether `delete_pages` sends integers, whether a task tool exists (issue #157), whether deletes are gated, whether `update_document` still takes `content`, whether the create calls for tags, correspondents and types still omit `owner`, and whether upstream has left zod 4.4 (keep the household zod commit's described union members if it has not).
 3. Rebase the `household` branch onto the release tag, resolve conflicts, then run `npm ci`, `npm test` and `npm run build`.
 4. Check Paperless's bulk-edit API before relying on the result. Paperless 3.3.2 marks `delete`, `reprocess`, `rotate`, `merge`, `split` and `delete_pages` on `/api/documents/bulk_edit/` for removal when API v9 is dropped, so a Paperless upgrade can break this server before any rebase does.
 5. Review the new commit, then point the deployment at it.

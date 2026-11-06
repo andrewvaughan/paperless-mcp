@@ -97,10 +97,12 @@ export const customFieldQuerySchema = z
     }
   }) as unknown as z.ZodType<CustomFieldQuery>;
 
+// Each member carries a description so zod >= 4.5 cannot collapse the union into an array-valued `type`, which
+// strict MCP clients reject along with the whole tool (#138; household fork, zod 4.6.7 for GHSA-mrhx-c7xc-m3w5).
 const paperlessFilterScalarSchema = z.union([
-  z.string(),
-  z.number(),
-  z.boolean(),
+  z.string().describe("A text value"),
+  z.number().describe("A number value"),
+  z.boolean().describe("A true or false value"),
 ]);
 
 export const paperlessFilterValueSchema = z.union([
