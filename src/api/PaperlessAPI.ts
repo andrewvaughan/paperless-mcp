@@ -266,10 +266,13 @@ export class PaperlessAPI {
     return this.request<GetTagsResponse>("/tags/");
   }
 
+  // Household fork: tags, correspondents and document types are created with no owner unless the caller names one.
+  // Paperless makes the requesting user the owner when the request body has no "owner" key, and an owned object is
+  // hidden from every other non-superuser, so one agent's new tag was invisible to the other (2026-11-05).
   async createTag(data: Partial<Tag>): Promise<Tag> {
     return this.request<Tag>("/tags/", {
       method: "POST",
-      body: JSON.stringify(data),
+      body: JSON.stringify({ owner: null, ...data }),
     });
   }
 
@@ -305,7 +308,7 @@ export class PaperlessAPI {
   ): Promise<Correspondent> {
     return this.request<Correspondent>("/correspondents/", {
       method: "POST",
-      body: JSON.stringify(data),
+      body: JSON.stringify({ owner: null, ...data }),
     });
   }
 
@@ -333,7 +336,7 @@ export class PaperlessAPI {
   async createDocumentType(data: Partial<DocumentType>): Promise<DocumentType> {
     return this.request<DocumentType>("/document_types/", {
       method: "POST",
-      body: JSON.stringify(data),
+      body: JSON.stringify({ owner: null, ...data }),
     });
   }
 
